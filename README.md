@@ -114,30 +114,40 @@ cd ~/novnc-bar
 In the menu, click **Start noVNC Bar at Login** — a persistent login item
 via `SMAppService`. The checkmark shows the current state.
 
-## The URL (environment variable)
+## Configuration (`.env` file)
 
-Menu actions **Open in Browser** and **Copy URL** use `NOVNC_URL`,
-resolved at launch in this order:
+Menu actions **Open in Browser** and **Copy URL** need the URL that
+`tailscale serve` publishes — including the **MagicDNS** hostname. It is
+resolved at launch, in this order:
 
-1. **`NOVNC_URL` environment variable**
+1. **`NOVNC_URL` environment variable** (highest priority). GUI apps do
+   **not** see `.zshrc` exports — use one of these forms:
    ```bash
-   # session-wide for GUI apps:
-   launchctl setenv NOVNC_URL "https://host.tailnet.ts.net/vnc.html"
-
+   launchctl setenv NOVNC_URL "https://host.tailnet.ts.net/vnc.html"  # session-wide
    # or run the binary directly so the shell passes the export through:
    NOVNC_URL="https://host.tailnet.ts.net/vnc.html" \
      /Applications/NoVNCBar.app/Contents/MacOS/NoVNCBar
    ```
-   Note: GUI apps do **not** see `.zshrc` exports — use one of the two forms above.
-2. **User default** (persists across reboots — easiest)
+2. **`.env` file** — `~/.config/novnc-bar/.env` (recommended; persists
+   across reboots). Either the MagicDNS host, or a full URL:
+   ```bash
+   mkdir -p ~/.config/novnc-bar
+   cp .env.example ~/.config/novnc-bar/.env   # then edit:
+   #   NOVNC_HOST=your-mac.your-tailnet.ts.net
+   #   NOVNC_URL=https://your-mac.your-tailnet.ts.net/vnc.html   # wins over HOST
+   ```
+   Plain `KEY=VALUE` lines, `#` comments, optional quotes.
+3. **User default** — e.g.
    ```bash
    defaults write io.github.minons1.novncbar NOVNC_URL \
      "https://host.tailnet.ts.net/vnc.html"
    ```
-3. **Auto-detect** — with nothing configured, the app asks the tailscale CLI
-   for this machine's MagicDNS name and uses `https://<name>/vnc.html`.
-   Works out of the box on a standard setup.
-4. **Fallback**: `http://localhost:6080/vnc.html`
+4. **Auto-detect** — asks the tailscale CLI for this machine's MagicDNS
+   name and uses `https://<name>/vnc.html`. Works out of the box.
+5. **Fallback**: `http://localhost:6080/vnc.html`
+
+`.env` changes take effect after restarting the app
+(**Quit ⌘Q** and reopen, or `./build.sh --launch`).
 
 ## Status colors
 

@@ -25,18 +25,31 @@ enum Config {
     static var logPath: String { NSHomeDirectory() + "/novnc/novnc_proxy.log" }
     static var launchdDomain: String { "gui/\(getuid())" }
 
+    /// Optional `.env` file — simple `KEY=VALUE` lines (see README):
+    static var envFilePath: String {
+        NSHomeDirectory() + "/.config/novnc-bar/.env"
+    }
+    static let envFile: [String: String] = parseEnvFile(envFilePath)
+
     /// URL for “Open in Browser” / “Copy URL”, resolved at launch:
-    ///   1. `NOVNC_URL` environment variable — e.g.
-    ///        launchctl setenv NOVNC_URL "https://host.tailnet.ts.net/vnc.html"
-    ///      or, run the binary directly from a shell carrying the variable.
-    ///   2. `NOVNC_URL` user default (persists across reboots) — e.g.
+    ///   1. `NOVNC_URL` environment variable
+    ///        launchctl setenv NOVNC_URL "https://host.ts.net/vnc.html"
+    ///   2. `NOVNC_URL`, else `NOVNC_HOST` (MagicDNS name), from the `.env`
+    ///      file — host becomes https://<host>/vnc.html
+    ///   3. `NOVNC_URL` user default — e.g.
     ///        defaults write io.github.minons1.novncbar NOVNC_URL "https://…"
-    ///   3. auto-detect: MagicDNS name of this machine via the tailscale CLI
-    ///   4. fallback: just use localhost:6080
+    ///   4. auto-detect: MagicDNS name of this machine via the tailscale CLI
+    ///   5. fallback: just use localhost:6080
     static let serveURL: String = {
         if let env = ProcessInfo.processInfo.environment["NOVNC_URL"],
            !env.isEmpty {
             return env
+        }
+        if let url = envFile["NOVNC_URL"], !url.isEmpty {
+            return url
+        }
+        if let host = envFile["NOVNC_HOST"], !host.isEmpty {
+            return "https://\(host)/vnc.html"
         }
         if let stored = UserDefaults.standard.string(forKey: "NOVNC_URL"),
            !stored.isEmpty {
@@ -47,6 +60,31 @@ enum Config {
         }
         return "http://localhost:\(listenPort)/vnc.html"
     }()
+}
+
+/// Minimal `.env` parser: `KEY=VALUE` lines, `#` comments, optional
+/// surrounding quotes. Unparseable lines are ignored.
+private func parseEnvFile(_ path: String) -> [String: String] {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8)
+    else { return [:] }
+    var dict: [String: String] = [:]
+    for rawLine in text.split(separator: "\n") {
+        let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty, !line.hasPrefix("#"),
+              let eq = line.firstIndex(of: "=") else { continue }
+        let key = String(line[..<eq])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var value = String(line[line.index(after: eq)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if (value.hasPrefix("\"") && value.hasSuffix("\"") && value.count >= 2) ||
+           (value.hasPrefix("'") && value.hasSuffix("'") && value.count >= 2) {
+            value = String(value.dropFirst().dropLast())
+        }
+        if !key.isEmpty {
+            dict[key] = value
+        }
+    }
+    return dict
 }
 
 /// Best-effort detection of this machine's tailscale MagicDNS name.
