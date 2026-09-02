@@ -44,5 +44,5 @@ if [[ "${1:-}" == "--launch" ]]; then
     pkill -x "$NAME" 2>/dev/null || true
     sleep 0.5
     open -a "$APP"
-    echo "• Launched — look for the eye icon in the menu bar"
+    echo "• Launched — look for ● noVNC in the menu bar"
 fi
