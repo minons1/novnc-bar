@@ -160,8 +160,12 @@ resolved at launch, in this order:
 
 ## Troubleshooting
 
-- **Menu bar item not visible** — it's on the primary display's menu bar;
-  macOS hides overflow items when the bar is crowded.
+- **Menu bar item not visible** — it's on the primary display's menu bar.
+  macOS 26/27 may auto-hide crowded items (System Settings → Menu Bar) or
+  fold them behind the overflow arrow.
+- **What does the app actually see?** — it appends diagnostics to
+  `~/.config/novnc-bar/app.log` (resolved URL, state changes, status item
+  bounds). Useful when reporting issues.
 - **Changed noVNC JS in `~/novnc` but nothing happened** — hard-reload the
   page (`Cmd+Shift+R`); there's no cache-busting header.
 - **Rebuilt the app, login item stopped** — the ad-hoc code signature

@@ -102,20 +102,49 @@ private func tailscaleDNSName() -> String? {
         let stdout = Pipe()
         p.standardOutput = stdout
         p.standardError = Pipe()
+        p.standardInput = FileHandle.nullDevice
         do {
             try p.run()
-            p.waitUntilExit()
         } catch {
             continue
         }
-        guard p.terminationStatus == 0 else { continue }
+        // drain before waiting (see launchctl() for why)
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { continue }
         guard let obj = try? JSONSerialization.jsonObject(with: data),
               let myself = (obj as? [String: Any])?["Self"] as? [String: Any],
               let dns = myself["DNSName"] as? String, !dns.isEmpty else { continue }
         return dns.hasSuffix(".") ? String(dns.dropLast()) : dns
     }
     return nil
+}
+
+// MARK: - Planted troubleshooting log
+// Simple appended-file logging → ~/.config/novnc-bar/app.log (self-trimmed).
+
+enum Log {
+    static let path = NSHomeDirectory() + "/.config/novnc-bar/app.log"
+
+    static func app(_ msg: String) {
+        let fm = FileManager.default
+        if let size = (try? fm.attributesOfItem(atPath: path))?[.size] as? Int,
+           size > 128_000 {
+            try? fm.removeItem(atPath: path)
+        }
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss.SSS"
+        let line = "\(df.string(from: Date()))  \(msg)\n"
+        let data = Data(line.utf8)
+        if fm.fileExists(atPath: path),
+           let fh = FileHandle(forWritingAtPath: path) {
+            defer { try? fh.close() }
+            fh.seekToEndOfFile()
+            fh.write(data)
+        } else {
+            fm.createFile(atPath: path, contents: data)
+        }
+    }
 }
 
 // MARK: - State
@@ -143,22 +172,24 @@ func launchctl(_ args: [String], capture: Bool = false) -> (Int32, String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     p.arguments = args
+    p.standardInput = FileHandle.nullDevice
+    var outPipe: Pipe?
     if capture {
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = pipe
+        outPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = Pipe()      // own pipe, discarded
     }
     do {
         try p.run()
-        p.waitUntilExit()
     } catch {
         return (-1, "")
     }
-    var out = ""
-    if capture, let pipe = p.standardOutput as? Pipe {
-        out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(),
-                     encoding: .utf8) ?? ""
-    }
+    // IMPORTANT: drain the pipe *before* waiting for exit — waitUntilExit()
+    // first would deadlock the child once it fills the pipe buffer (the
+    // empty invisible menu bar item bug this app once had).
+    let out = outPipe.map { String(data: $0.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? "" } ?? ""
+    p.waitUntilExit()
     return (p.terminationStatus, out)
 }
 
@@ -174,15 +205,21 @@ final class Controller: NSObject, NSMenuDelegate {
     private var loginItem: NSMenuItem!
 
     private var state: ServiceState = .stopped
+    private var lastLoggedState: ServiceState?
 
     func start() {
         menu.autoenablesItems = false
         menu.delegate = self
         buildMenu()
         statusItem.menu = menu
+        Log.app("status item created; button \(statusItem.button == nil ? "NIL" : "ok")")
         refresh()
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.refresh()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            Log.app("t+3s frame=\(String(describing: self.statusItem.button?.frame)) length=\(self.statusItem.length) isVisible=\(self.statusItem.isVisible)")
         }
     }
 
@@ -199,7 +236,8 @@ final class Controller: NSObject, NSMenuDelegate {
         guard FileManager.default.fileExists(atPath: Config.plistPath) else {
             return .missing
         }
-        let (rc, out) = launchctl(["print", Config.launchdDomain, Config.agentLabel],
+        let (rc, out) = launchctl(["print",
+                                  "\(Config.launchdDomain)/\(Config.agentLabel)"],
                                   capture: true)
         guard rc == 0 else { return .stopped }   // not loaded in the domain
         if out.contains("state = running") { return .running }
@@ -214,14 +252,19 @@ final class Controller: NSObject, NSMenuDelegate {
 
         // Text + colored dot instead of an SF Symbol image: system symbols
         // can silently render nothing (or hide), a title is always drawn.
-        let label = NSMutableAttributedString(
-            string: "●  noVNC",
-            attributes: [.font: NSFont.menuBarFont(ofSize: 0)])
-        label.addAttribute(.foregroundColor,
-                           value: st.dotColor,
-                           range: NSRange(location: 0,length: 1))   // just the dot
-        statusItem.button?.attributedTitle = label
+        // Plainest possible rendering: an ordinary text title plus a tiny
+        // hand-drawn dot image. No SF Symbols and no attributed strings —
+        // both proved unreliable on macOS 26/27 (Tahoe-and-newer).
+        statusItem.button?.title = "noVNC"
+        statusItem.button?.image = Self.dotImage(st.dotColor)
+        statusItem.button?.imagePosition = .imageLeft
         statusItem.button?.toolTip = "noVNC — " + st.rawValue
+        statusItem.isVisible = true
+
+        if st != lastLoggedState {
+            lastLoggedState = st
+            Log.app("state → \(st.rawValue)  frame: \(String(describing: statusItem.button?.frame))  isVisible: \(statusItem.isVisible)")
+        }
 
         let sub = switch st {
         case .running: "websockify open on \(Config.listenHost):\(Config.listenPort)"
@@ -289,7 +332,7 @@ final class Controller: NSObject, NSMenuDelegate {
     @objc private func toggle() {
         switch state {
         case .running, .failed:
-            launchctl(["bootout", Config.launchdDomain, Config.agentLabel])
+            launchctl(["bootout", "\(Config.launchdDomain)/\(Config.agentLabel)"])
         case .stopped:
             launchctl(["bootstrap", Config.launchdDomain, Config.plistPath])
         case .missing:
@@ -318,6 +361,19 @@ final class Controller: NSObject, NSMenuDelegate {
 
     @objc private func openLog() {
         NSWorkspace.shared.open(URL(fileURLWithPath: Config.logPath))
+    }
+
+    private static func dotImage(_ color: NSColor) -> NSImage {
+        let img = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            color.setFill()
+            let d = min(rect.width, rect.height) * 0.75
+            NSBezierPath(ovalIn: NSRect(x: (rect.width - d) / 2,
+                                        y: (rect.height - d) / 2,
+                                        width: d, height: d)).fill()
+            return true
+        }
+        img.isTemplate = false   // keep our own color, don't mono-strip
+        return img
     }
 
     // MARK: start at login (SMAppService, macOS 13+)
@@ -368,6 +424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: Controller?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Log.app("launch — serveURL=\(Config.serveURL)  .env keys: \(Config.envFile.keys.sorted())")
         let c = Controller()
         c.start()
         controller = c   // keep alive
